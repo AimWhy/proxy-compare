@@ -1,14 +1,15 @@
 # proxy-compare
 
-[![CI](https://img.shields.io/github/workflow/status/dai-shi/proxy-compare/CI)](https://github.com/dai-shi/proxy-compare/actions?query=workflow%3ACI)
+[![CI](https://img.shields.io/github/actions/workflow/status/dai-shi/proxy-compare/ci.yml?branch=main)](https://github.com/dai-shi/proxy-compare/actions?query=workflow%3ACI)
 [![npm](https://img.shields.io/npm/v/proxy-compare)](https://www.npmjs.com/package/proxy-compare)
 [![size](https://img.shields.io/bundlephobia/minzip/proxy-compare)](https://bundlephobia.com/result?p=proxy-compare)
+[![discord](https://img.shields.io/discord/627656437971288081)](https://discord.gg/MrQdmzd)
 
 Compare two objects using accessed properties with Proxy
 
 ## Introduction
 
-This is an internal library used in [React Tracked](https://react-tracked.js.org).
+This is an internal library used in state management libraries such as [React Tracked](https://react-tracked.js.org) and [Valtio](https://github.com/pmndrs/valtio).
 
 ## Install
 
@@ -27,17 +28,15 @@ undefined
 > affected = new WeakMap()
 WeakMap { [items unknown] }
 > proxy = createProxy(state, affected)
-Proxy [ { a: 1, b: 2 },
-  { r: [Function],
-    u: [Function],
-    get: [Function],
-    has: [Function],
-    ownKeys: [Function],
-    p: Proxy [ [Object], [Circular] ],
-    o: { a: 1, b: 2 },
-    t: false,
-    a: WeakMap { [items unknown] },
-    c: undefined } ]
+Proxy [
+  { a: 1, b: 2 },
+  {
+    get: [Function: get],
+    has: [Function: has],
+    getOwnPropertyDescriptor: [Function: getOwnPropertyDescriptor],
+    ownKeys: [Function: ownKeys]
+  }
+]
 > proxy.a
 1
 > isChanged(state, { a: 1, b: 22 }, affected)
@@ -65,6 +64,7 @@ for this purpose you can use the `affectedToPathList` helper.
 *   `obj` **[object](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Object)** Object that will be wrapped on the proxy.
 *   `affected` **[WeakMap](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/WeakMap)<[object](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Object), unknown>** WeakMap that will hold the tracking of which properties in the proxied object were accessed.
 *   `proxyCache` **[WeakMap](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/WeakMap)<[object](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Object), unknown>?** WeakMap that will help keep referential identity for proxies.
+*   `targetCache` **[WeakMap](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/WeakMap)<[object](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Object), any>?**&#x20;
 
 #### Examples
 
@@ -103,6 +103,7 @@ on the proxy, then isChanged will only compare the affected properties.
 *   `affected` **[WeakMap](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/WeakMap)<[object](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Object), unknown>** WeakMap that holds the tracking of which properties in the proxied object were accessed.
 *   `cache` **[WeakMap](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/WeakMap)<[object](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Object), unknown>?** WeakMap that holds a cache of the comparisons for better performance with repetitive comparisons,
     and to avoid infinite loop with circular structures.
+*   `isEqual` **function (a: any, b: any): [boolean](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Boolean)**  (optional, default `Object.is`)
 
 #### Examples
 
@@ -186,6 +187,34 @@ isChanged(original, { d: { e: "3" } }, affected) // true
 ```
 
 Returns **any** No return.
+
+### affectedToPathList
+
+Convert `affected` to path list
+
+`affected` is a weak map which is not printable.
+This function is can convert it to printable path list.
+It's for debugging purpose.
+
+#### Parameters
+
+*   `obj` **any** An object that is used with `createProxy`.
+*   `affected` **[WeakMap](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/WeakMap)<[object](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Object), any>** A weak map that is used with `createProxy`.
+*   `onlyWithValues` **[boolean](https://developer.mozilla.org/docs/Web/JavaScript/Reference/Global_Objects/Boolean)?** An optional boolean to exclude object getters.
+
+Returns **any** An array of paths.
+
+### replaceNewProxy
+
+replace newProxy function.
+
+This can be used if you want to use proxy-polyfill.
+Note that proxy-polyfill can't polyfill everything.
+Use it at your own risk.
+
+#### Parameters
+
+*   `fn` **any**&#x20;
 
 ## Projects using this library
 

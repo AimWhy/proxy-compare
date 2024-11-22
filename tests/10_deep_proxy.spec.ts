@@ -1,4 +1,7 @@
-import { createProxy, isChanged, affectedToPathList } from '../src/index';
+/* eslint @typescript-eslint/no-explicit-any: off */
+
+import { describe, expect, it } from 'vitest';
+import { createProxy, isChanged, affectedToPathList } from 'proxy-compare';
 
 const noop = (_arg: unknown) => {
   // do nothing
@@ -137,6 +140,7 @@ describe('keys spec', () => {
     expect(isChanged(s1, { a: { b: 'b' }, c: 'c' }, a1)).toBe(false);
     expect(isChanged(s1, { a: s1.a }, a1)).toBe(true);
     expect(isChanged(s1, { a: s1.a, c: 'c', d: 'd' }, a1)).toBe(true);
+    expect(affectedToPathList(s1, a1)).toEqual([[':ownKeys']]);
   });
 
   it('for-in', () => {
@@ -160,22 +164,21 @@ describe('keys spec', () => {
     noop('a' in p1);
     expect(isChanged(s1, { a: s1.a, c: 'c' }, a1)).toBe(false);
     expect(isChanged(s1, { a: s1.a }, a1)).toBe(false);
+    expect(isChanged(s1, { a: null }, a1)).toBe(false);
     expect(isChanged(s1, { c: 'c', d: 'd' }, a1)).toBe(true);
+    expect(affectedToPathList(s1, a1)).toEqual([[':has(a)']]);
   });
 
   it('hasOwnProperty', () => {
     const s1 = { a: { b: 'b' }, c: 'c' };
     const a1 = new WeakMap();
     const p1 = createProxy(s1, a1);
-    // eslint-disable-next-line no-prototype-builtins
-    noop(p1.hasOwnProperty('a'));
+    noop(Object.prototype.hasOwnProperty.call(p1, 'a'));
     expect(isChanged(s1, { a: s1.a, c: 'c' }, a1)).toBe(false);
     expect(isChanged(s1, { a: s1.a }, a1)).toBe(false);
+    expect(isChanged(s1, { a: null, c: 'c' }, a1)).toBe(false);
     expect(isChanged(s1, { c: 'c', d: 'd' }, a1)).toBe(true);
-    // NOTE: due to the way this is implemented,
-    // changing the value of 'a' causes a change,
-    // even though we only used `hasOwnProperty` above.
-    expect(isChanged(s1, { a: null, c: 'c' }, a1)).toBe(true);
+    expect(affectedToPathList(s1, a1)).toEqual([[':hasOwn(a)']]);
   });
 });
 
@@ -217,7 +220,7 @@ describe('special objects spec', () => {
 
   it('frozen object', () => {
     const proxyCache = new WeakMap();
-    const s1: { a: { b: string }, c?: string } = { a: { b: 'b' }, c: 'c' };
+    const s1: { a: { b: string }; c?: string } = { a: { b: 'b' }, c: 'c' };
     Object.freeze(s1);
     const a1 = new WeakMap();
     const p1 = createProxy(s1, a1, proxyCache);
@@ -225,13 +228,17 @@ describe('special objects spec', () => {
     expect(isChanged(s1, s1, a1)).toBe(false);
     expect(isChanged(s1, { a: { b: 'b' } }, a1)).toBe(false);
     expect(isChanged(s1, { a: { b: 'b2' } }, a1)).toBe(true);
-    expect(() => { p1.a = { b: 'b3' }; }).toThrow();
-    expect(() => { delete p1.c; }).toThrow();
+    expect(() => {
+      p1.a = { b: 'b3' };
+    }).toThrow();
+    expect(() => {
+      delete p1.c;
+    }).toThrow();
   });
 
-  it('object with defineProperty (non-configurable and non-writable)', () => {
+  it('object with defineProperty (value only, implying non-configurable & non-writable)', () => {
     const proxyCache = new WeakMap();
-    const s1: any = {};
+    const s1: any = { c: 'c' };
     Object.defineProperty(s1, 'a', { value: { b: 'b' } });
     const a1 = new WeakMap();
     const p1 = createProxy(s1, a1, proxyCache);
@@ -239,6 +246,68 @@ describe('special objects spec', () => {
     expect(isChanged(s1, s1, a1)).toBe(false);
     expect(isChanged(s1, { a: { b: 'b' } }, a1)).toBe(false);
     expect(isChanged(s1, { a: { b: 'b2' } }, a1)).toBe(true);
+    // Even though we've made a configurable copy, it is still non-writable, which is good b/c the
+    // new value would go to the internal proxyFriendlyCopy copy we'd made.
+    expect(() => {
+      p1.a = { b: 'b2' };
+    }).toThrowError("'set' on proxy: trap returned falsish for property 'a'");
+    // And because it is a copy, it is readonly for all properties
+    expect(() => {
+      p1.c = 'c2';
+    }).toThrowError("'set' on proxy: trap returned falsish for property 'c'");
+  });
+
+  it('object with defineProperty (value, non-configurable and not-writable)', () => {
+    const proxyCache = new WeakMap();
+    const s1: any = {};
+    Object.defineProperty(s1, 'a', {
+      value: { b: 'b' },
+      configurable: false,
+      writable: false,
+    });
+    const a1 = new WeakMap();
+    const p1 = createProxy(s1, a1, proxyCache);
+    noop(p1.a.b);
+  });
+
+  it('object with defineProperty (value, non-configurable but writable)', () => {
+    const proxyCache = new WeakMap();
+    const s1: any = {};
+    Object.defineProperty(s1, 'a', {
+      value: { b: 'b' },
+      configurable: false,
+      writable: true,
+    });
+    const a1 = new WeakMap();
+    const p1 = createProxy(s1, a1, proxyCache);
+    noop(p1.a.b);
+  });
+
+  it('object with defineProperty (vaule, configurable but not-writable)', () => {
+    const proxyCache = new WeakMap();
+    const s1: any = {};
+    Object.defineProperty(s1, 'a', {
+      value: { b: 'b' },
+      configurable: true,
+      writable: false,
+    });
+    const a1 = new WeakMap();
+    const p1 = createProxy(s1, a1, proxyCache);
+    noop(p1.a.b);
+  });
+
+  it('object with defineProperty (getter, non-configurable)', () => {
+    const proxyCache = new WeakMap();
+    const s1: any = {};
+    Object.defineProperty(s1, 'a', {
+      get() {
+        return { b: 'b' };
+      },
+      configurable: false,
+    });
+    const a1 = new WeakMap();
+    const p1 = createProxy(s1, a1, proxyCache);
+    noop(p1.a.b);
   });
 });
 
@@ -274,7 +343,9 @@ describe('builtin objects spec', () => {
     const p1 = createProxy(s1, a1, proxyCache);
     noop(p1.a.getTime());
     expect(isChanged(s1, s1, a1)).toBe(false);
-    expect(isChanged(s1, { a: new Date('2019-05-11T12:22:29.293Z') }, a1)).toBe(true);
+    expect(isChanged(s1, { a: new Date('2019-05-11T12:22:29.293Z') }, a1)).toBe(
+      true,
+    );
   });
 
   it('regexp', () => {

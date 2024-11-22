@@ -1,15 +1,23 @@
+/* eslint @typescript-eslint/no-explicit-any: off */
+
 // symbols
-const OWN_KEYS_SYMBOL = Symbol();
 const TRACK_MEMO_SYMBOL = Symbol();
 const GET_ORIGINAL_SYMBOL = Symbol();
 
 // properties
 const AFFECTED_PROPERTY = 'a';
-const FROZEN_PROPERTY = 'f';
+const IS_TARGET_COPIED_PROPERTY = 'f';
 const PROXY_PROPERTY = 'p';
 const PROXY_CACHE_PROPERTY = 'c';
-const NEXT_OBJECT_PROPERTY = 'n';
-const CHANGED_PROPERTY = 'g';
+const TARGET_CACHE_PROPERTY = 't';
+const HAS_KEY_PROPERTY = 'h';
+const ALL_OWN_KEYS_PROPERTY = 'w';
+const HAS_OWN_KEY_PROPERTY = 'o';
+const KEYS_PROPERTY = 'k';
+
+// function to create a new bare proxy
+let newProxy = <T extends object>(target: T, handler: ProxyHandler<T>) =>
+  new Proxy(target, handler);
 
 // get object prototype
 const getProto = Object.getPrototypeOf;
@@ -17,123 +25,146 @@ const getProto = Object.getPrototypeOf;
 const objectsToTrack = new WeakMap<object, boolean>();
 
 // check if obj is a plain object or an array
-const isObjectToTrack = <T>(obj: T): obj is T extends object ? T : never => (
-  obj && (objectsToTrack.has(obj as unknown as object)
-    ? objectsToTrack.get(obj as unknown as object) as boolean
-    : (getProto(obj) === Object.prototype || getProto(obj) === Array.prototype)
-  )
-);
+const isObjectToTrack = <T>(obj: T): obj is T extends object ? T : never =>
+  obj &&
+  (objectsToTrack.has(obj as unknown as object)
+    ? (objectsToTrack.get(obj as unknown as object) as boolean)
+    : getProto(obj) === Object.prototype || getProto(obj) === Array.prototype);
 
 // check if it is object
-const isObject = (x: unknown): x is object => (
-  typeof x === 'object' && x !== null
-);
+const isObject = (x: unknown): x is object =>
+  typeof x === 'object' && x !== null;
 
-// check if frozen
-const isFrozen = (obj: object) => (
-  Object.isFrozen(obj) || (
-    // Object.isFrozen() doesn't detect non-writable properties
-    // See: https://github.com/dai-shi/proxy-compare/pull/8
-    Object.values(Object.getOwnPropertyDescriptors(obj)).some(
-      (descriptor) => !descriptor.writable,
-    )
-  )
-);
+// Properties that are both non-configurable and non-writable will break
+// the proxy get trap when we try to return a recursive/child compare proxy
+// from them. We can avoid this by making a copy of the target object with
+// all descriptors marked as configurable, see `copyTargetObject`.
+// See: https://github.com/dai-shi/proxy-compare/pull/8
+const needsToCopyTargetObject = (obj: object) =>
+  Object.values(Object.getOwnPropertyDescriptors(obj)).some(
+    (descriptor) => !descriptor.configurable && !descriptor.writable,
+  );
 
-// copy frozen object
-const unfreeze = (obj: object) => {
+// Make a copy with all descriptors marked as configurable.
+const copyTargetObject = <T extends object>(obj: T): T => {
   if (Array.isArray(obj)) {
     // Arrays need a special way to copy
-    return Array.from(obj);
+    return Array.from(obj) as T;
   }
   // For non-array objects, we create a new object keeping the prototype
   // with changing all configurable options (otherwise, proxies will complain)
   const descriptors = Object.getOwnPropertyDescriptors(obj);
-  Object.values(descriptors).forEach((desc) => { desc.configurable = true; });
+  Object.values(descriptors).forEach((desc) => {
+    desc.configurable = true;
+  });
   return Object.create(getProto(obj), descriptors);
 };
 
-type Affected = WeakMap<object, Set<string | symbol>>;
-type ProxyCache<T extends object> = WeakMap<object, ProxyHandler<T>>;
-type ProxyHandler<T extends object> = {
-  [FROZEN_PROPERTY]: boolean;
+type HasKeySet = Set<string | symbol>;
+type HasOwnKeySet = Set<string | symbol>;
+type KeysSet = Set<string | symbol>;
+type Used = {
+  [HAS_KEY_PROPERTY]?: HasKeySet;
+  [ALL_OWN_KEYS_PROPERTY]?: true;
+  [HAS_OWN_KEY_PROPERTY]?: HasOwnKeySet;
+  [KEYS_PROPERTY]?: KeysSet;
+};
+type Affected = WeakMap<object, Used>;
+type ProxyHandlerState<T extends object> = {
+  readonly [IS_TARGET_COPIED_PROPERTY]: boolean;
   [PROXY_PROPERTY]?: T;
   [PROXY_CACHE_PROPERTY]?: ProxyCache<object> | undefined;
+  [TARGET_CACHE_PROPERTY]?: TargetCache<object> | undefined;
   [AFFECTED_PROPERTY]?: Affected;
-  get(target: T, key: string | symbol): unknown;
-  has(target: T, key: string | symbol): boolean;
-  getOwnPropertyDescriptor(target: T, key: string | symbol): PropertyDescriptor | undefined;
-  ownKeys(target: T): (string | symbol)[];
-  set?(target: T, key: string | symbol, value: unknown): boolean;
-  deleteProperty?(target: T, key: string | symbol): boolean;
 };
+type ProxyCache<T extends object> = WeakMap<
+  object,
+  readonly [ProxyHandler<T>, ProxyHandlerState<T>]
+>;
+type TargetCache<T extends object> = WeakMap<
+  object,
+  readonly [target: T, copiedTarget?: T]
+>;
 
-const createProxyHandler = <T extends object>(origObj: T, frozen: boolean) => {
+const createProxyHandler = <T extends object>(
+  origObj: T,
+  isTargetCopied: boolean,
+) => {
+  const state: ProxyHandlerState<T> = {
+    [IS_TARGET_COPIED_PROPERTY]: isTargetCopied,
+  };
   let trackObject = false; // for trackMemo
-  const recordUsage = (h: ProxyHandler<T>, key: string | symbol, skipWithOwnKeys?: boolean) => {
+  const recordUsage = (
+    type:
+      | typeof HAS_KEY_PROPERTY
+      | typeof ALL_OWN_KEYS_PROPERTY
+      | typeof HAS_OWN_KEY_PROPERTY
+      | typeof KEYS_PROPERTY,
+    key?: string | symbol,
+  ) => {
     if (!trackObject) {
-      let used = (h[AFFECTED_PROPERTY] as Affected).get(origObj);
+      let used = (state[AFFECTED_PROPERTY] as Affected).get(origObj);
       if (!used) {
-        used = new Set();
-        (h[AFFECTED_PROPERTY] as Affected).set(origObj, used);
+        used = {};
+        (state[AFFECTED_PROPERTY] as Affected).set(origObj, used);
       }
-      if (!skipWithOwnKeys || !used.has(OWN_KEYS_SYMBOL)) {
-        used.add(key);
+      if (type === ALL_OWN_KEYS_PROPERTY) {
+        used[ALL_OWN_KEYS_PROPERTY] = true;
+      } else {
+        let set = used[type];
+        if (!set) {
+          set = new Set();
+          used[type] = set;
+        }
+        set.add(key as string | symbol);
       }
     }
   };
-  const recordObjectAsUsed = (h: ProxyHandler<T>) => {
+  const recordObjectAsUsed = () => {
     trackObject = true;
-    (h[AFFECTED_PROPERTY] as Affected).delete(origObj);
+    (state[AFFECTED_PROPERTY] as Affected).delete(origObj);
   };
   const handler: ProxyHandler<T> = {
-    [FROZEN_PROPERTY]: frozen,
     get(target, key) {
       if (key === GET_ORIGINAL_SYMBOL) {
         return origObj;
       }
-      recordUsage(this, key);
+      recordUsage(KEYS_PROPERTY, key);
       return createProxy(
-        (target as any)[key],
-        (this[AFFECTED_PROPERTY] as Affected),
-        this[PROXY_CACHE_PROPERTY],
+        Reflect.get(target, key),
+        state[AFFECTED_PROPERTY] as Affected,
+        state[PROXY_CACHE_PROPERTY],
+        state[TARGET_CACHE_PROPERTY],
       );
     },
     has(target, key) {
       if (key === TRACK_MEMO_SYMBOL) {
-        recordObjectAsUsed(this);
+        recordObjectAsUsed();
         return true;
       }
-      // LIMITATION: We simply record the same as `get`.
-      // This means { a: {} } and { a: {} } is detected as changed,
-      // if `'a' in obj` is handled.
-      recordUsage(this, key);
-      return key in target;
+      recordUsage(HAS_KEY_PROPERTY, key);
+      return Reflect.has(target, key);
     },
     getOwnPropertyDescriptor(target, key) {
-      // LIMITATION: We simply record the same as `get`.
-      // This means { a: {} } and { a: {} } is detected as changed,
-      // if `obj.getOwnPropertyDescriptor('a'))` is handled.
-      recordUsage(this, key, true);
-      return Object.getOwnPropertyDescriptor(target, key);
+      recordUsage(HAS_OWN_KEY_PROPERTY, key);
+      return Reflect.getOwnPropertyDescriptor(target, key);
     },
     ownKeys(target) {
-      recordUsage(this, OWN_KEYS_SYMBOL);
+      recordUsage(ALL_OWN_KEYS_PROPERTY);
       return Reflect.ownKeys(target);
     },
   };
-  if (frozen) {
+  if (isTargetCopied) {
     handler.set = handler.deleteProperty = () => false;
   }
-  return handler;
+  return [handler, state] as const;
 };
 
-const getOriginalObject = <T extends object>(obj: T) => (
+const getOriginalObject = <T extends object>(obj: T) =>
   // unwrap proxy
-  (obj as { [GET_ORIGINAL_SYMBOL]?: typeof obj })[GET_ORIGINAL_SYMBOL]
+  (obj as { [GET_ORIGINAL_SYMBOL]?: typeof obj })[GET_ORIGINAL_SYMBOL] ||
   // otherwise
-  || obj
-);
+  obj;
 
 /**
  * Create a proxy.
@@ -170,39 +201,54 @@ export const createProxy = <T>(
   obj: T,
   affected: WeakMap<object, unknown>,
   proxyCache?: WeakMap<object, unknown>,
+  targetCache?: WeakMap<object, unknown>,
 ): T => {
   if (!isObjectToTrack(obj)) return obj;
-  const target = getOriginalObject(obj);
-  const frozen = isFrozen(target);
-  let proxyHandler: ProxyHandler<typeof target> | undefined = (
-    proxyCache && (proxyCache as ProxyCache<typeof target>).get(target)
-  );
-  if (!proxyHandler || proxyHandler[FROZEN_PROPERTY] !== frozen) {
-    proxyHandler = createProxyHandler<T extends object ? T : never>(target, frozen);
-    proxyHandler[PROXY_PROPERTY] = new Proxy(
-      frozen ? unfreeze(target) : target,
-      proxyHandler,
-    ) as typeof target;
+  let targetAndCopied =
+    targetCache && (targetCache as TargetCache<typeof obj>).get(obj);
+  if (!targetAndCopied) {
+    const target = getOriginalObject(obj);
+    if (needsToCopyTargetObject(target)) {
+      targetAndCopied = [target, copyTargetObject(target)];
+    } else {
+      targetAndCopied = [target];
+    }
+    targetCache?.set(obj, targetAndCopied);
+  }
+  const [target, copiedTarget] = targetAndCopied;
+  let handlerAndState =
+    proxyCache && (proxyCache as ProxyCache<typeof target>).get(target);
+  if (
+    !handlerAndState ||
+    handlerAndState[1][IS_TARGET_COPIED_PROPERTY] !== !!copiedTarget
+  ) {
+    handlerAndState = createProxyHandler<typeof target>(target, !!copiedTarget);
+    handlerAndState[1][PROXY_PROPERTY] = newProxy(
+      copiedTarget || target,
+      handlerAndState[0],
+    );
     if (proxyCache) {
-      proxyCache.set(target, proxyHandler);
+      proxyCache.set(target, handlerAndState);
     }
   }
-  proxyHandler[AFFECTED_PROPERTY] = affected as Affected;
-  proxyHandler[PROXY_CACHE_PROPERTY] = proxyCache as ProxyCache<object> | undefined;
-  return proxyHandler[PROXY_PROPERTY] as typeof target;
+  handlerAndState[1][AFFECTED_PROPERTY] = affected as Affected;
+  handlerAndState[1][PROXY_CACHE_PROPERTY] = proxyCache as
+    | ProxyCache<object>
+    | undefined;
+  handlerAndState[1][TARGET_CACHE_PROPERTY] = targetCache as
+    | TargetCache<object>
+    | undefined;
+  return handlerAndState[1][PROXY_PROPERTY] as typeof target;
 };
 
-const isOwnKeysChanged = (prevObj: object, nextObj: object) => {
+const isAllOwnKeysChanged = (prevObj: object, nextObj: object) => {
   const prevKeys = Reflect.ownKeys(prevObj);
   const nextKeys = Reflect.ownKeys(nextObj);
-  return prevKeys.length !== nextKeys.length
-    || prevKeys.some((k, i) => k !== nextKeys[i]);
+  return (
+    prevKeys.length !== nextKeys.length ||
+    prevKeys.some((k, i) => k !== nextKeys[i])
+  );
 };
-
-type ChangedCache = WeakMap<object, {
-  [NEXT_OBJECT_PROPERTY]: object;
-  [CHANGED_PROPERTY]: boolean;
-}>;
 
 /**
  * Compare changes on objects.
@@ -243,45 +289,50 @@ export const isChanged = (
   prevObj: unknown,
   nextObj: unknown,
   affected: WeakMap<object, unknown>,
-  cache?: WeakMap<object, unknown>,
+  cache?: WeakMap<object, unknown>, // for object with cycles
+  isEqual: (a: unknown, b: unknown) => boolean = Object.is,
 ): boolean => {
-  if (Object.is(prevObj, nextObj)) {
+  if (isEqual(prevObj, nextObj)) {
     return false;
   }
   if (!isObject(prevObj) || !isObject(nextObj)) return true;
   const used = (affected as Affected).get(getOriginalObject(prevObj));
   if (!used) return true;
   if (cache) {
-    const hit = (cache as ChangedCache).get(prevObj);
-    if (hit && hit[NEXT_OBJECT_PROPERTY] === nextObj) {
-      return hit[CHANGED_PROPERTY];
+    const hit = cache.get(prevObj);
+    if (hit === nextObj) {
+      return false;
     }
     // for object with cycles
-    (cache as ChangedCache).set(prevObj, {
-      [NEXT_OBJECT_PROPERTY]: nextObj,
-      [CHANGED_PROPERTY]: false,
-    });
+    cache.set(prevObj, nextObj);
   }
   let changed: boolean | null = null;
-  // eslint-disable-next-line no-restricted-syntax
-  for (const key of used) {
-    const c = key === OWN_KEYS_SYMBOL ? isOwnKeysChanged(prevObj, nextObj)
-      : isChanged(
-        (prevObj as any)[key],
-        (nextObj as any)[key],
-        affected,
-        cache,
-      );
-    if (c === true || c === false) changed = c;
-    if (changed) break;
+  for (const key of used[HAS_KEY_PROPERTY] || []) {
+    changed = Reflect.has(prevObj, key) !== Reflect.has(nextObj, key);
+    if (changed) return changed;
   }
-  if (changed === null) changed = true;
-  if (cache) {
-    cache.set(prevObj, {
-      [NEXT_OBJECT_PROPERTY]: nextObj,
-      [CHANGED_PROPERTY]: changed,
-    });
+  if (used[ALL_OWN_KEYS_PROPERTY] === true) {
+    changed = isAllOwnKeysChanged(prevObj, nextObj);
+    if (changed) return changed;
+  } else {
+    for (const key of used[HAS_OWN_KEY_PROPERTY] || []) {
+      const hasPrev = !!Reflect.getOwnPropertyDescriptor(prevObj, key);
+      const hasNext = !!Reflect.getOwnPropertyDescriptor(nextObj, key);
+      changed = hasPrev !== hasNext;
+      if (changed) return changed;
+    }
   }
+  for (const key of used[KEYS_PROPERTY] || []) {
+    changed = isChanged(
+      (prevObj as any)[key],
+      (nextObj as any)[key],
+      affected,
+      cache,
+      isEqual,
+    );
+    if (changed) return changed;
+  }
+  if (changed === null) throw new Error('invalid used');
   return changed;
 };
 
@@ -330,7 +381,7 @@ export const getUntracked = <T>(obj: T): T | null => {
  *
  * @param obj - Object to mark as tracked or not.
  * @param mark - Boolean indicating whether you want to track this object or not.
- * @returns No return.
+ * @returns - No return.
  *
  * @example
  * import { createProxy, markToTrack, isChanged } from 'proxy-compare';
@@ -352,10 +403,22 @@ export const markToTrack = (obj: object, mark = true) => {
   objectsToTrack.set(obj, mark);
 };
 
-// convert affected to path list
+/**
+ * Convert `affected` to path list
+ *
+ * `affected` is a weak map which is not printable.
+ * This function is can convert it to printable path list.
+ * It's for debugging purpose.
+ *
+ * @param obj - An object that is used with `createProxy`.
+ * @param affected - A weak map that is used with `createProxy`.
+ * @param onlyWithValues - An optional boolean to exclude object getters.
+ * @returns - An array of paths.
+ */
 export const affectedToPathList = (
   obj: unknown,
   affected: WeakMap<object, unknown>,
+  onlyWithValues?: boolean,
 ) => {
   const list: (string | symbol)[][] = [];
   const seen = new WeakSet();
@@ -367,10 +430,29 @@ export const affectedToPathList = (
     if (isObject(x)) {
       seen.add(x);
     }
-    const used = isObject(x) && (affected as Affected).get(getOriginalObject(x));
+    const used =
+      isObject(x) && (affected as Affected).get(getOriginalObject(x));
     if (used) {
-      used.forEach((key) => {
-        walk((x as any)[key], path ? [...path, key] : [key]);
+      used[HAS_KEY_PROPERTY]?.forEach((key) => {
+        const segment = `:has(${String(key)})`;
+        list.push(path ? [...path, segment] : [segment]);
+      });
+      if (used[ALL_OWN_KEYS_PROPERTY] === true) {
+        const segment = ':ownKeys';
+        list.push(path ? [...path, segment] : [segment]);
+      } else {
+        used[HAS_OWN_KEY_PROPERTY]?.forEach((key) => {
+          const segment = `:hasOwn(${String(key)})`;
+          list.push(path ? [...path, segment] : [segment]);
+        });
+      }
+      used[KEYS_PROPERTY]?.forEach((key) => {
+        if (
+          !onlyWithValues ||
+          'value' in (Object.getOwnPropertyDescriptor(x, key) || {})
+        ) {
+          walk((x as any)[key], path ? [...path, key] : [key]);
+        }
       });
     } else if (path) {
       list.push(path);
@@ -378,4 +460,15 @@ export const affectedToPathList = (
   };
   walk(obj);
   return list;
+};
+
+/**
+ * replace newProxy function.
+ *
+ * This can be used if you want to use proxy-polyfill.
+ * Note that proxy-polyfill can't polyfill everything.
+ * Use it at your own risk.
+ */
+export const replaceNewProxy = (fn: typeof newProxy) => {
+  newProxy = fn;
 };

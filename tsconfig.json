@@ -1,18 +1,19 @@
 {
   "compilerOptions": {
     "strict": true,
-    "target": "es5",
-    "downlevelIteration": true,
+    "target": "es2018",
     "esModuleInterop": true,
-    "module": "es2015",
-    "moduleResolution": "node",
+    "module": "nodenext",
+    "skipLibCheck": true,
     "allowJs": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
+    "verbatimModuleSyntax": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
-    "sourceMap": true,
+    "jsx": "react-jsx",
     "baseUrl": ".",
-    "outDir": "./dist"
-  }
+    "paths": {
+      "proxy-compare": ["./src/index.js"]
+    }
+  },
+  "exclude": ["dist", "examples"]
 }
